@@ -21,7 +21,7 @@ FIRMWARE       = "1.0.0"
 # ─── Authentication ──────────────────────────────────────────────────────────
 # Default RFID / idTag used for Authorize, StartTransaction, StopTransaction.
 
-DEFAULT_ID_TAG = DEFAULT_ID_TAG,
+DEFAULT_ID_TAG = "DEFAULT_ID_TAG"
 BASIC_AUTH_USER     = "CHARGE_BOX_ID"              # Charger ID
 BASIC_AUTH_PASSWORD = "16-TO-20-DIGIT-PASSWORD"    # CSMS PASSWORD
 

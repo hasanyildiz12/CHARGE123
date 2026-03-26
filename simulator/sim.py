@@ -27,8 +27,8 @@ except ImportError:
 
 sys.path.insert(0, ".")
 from config.config import (
-    CSMS_URL       as _CFG_CSMS_URL,
-    CHARGE_BOX_ID  as _CFG_CHARGE_BOX_ID,
+    CSMS_URL       as _CFG_CSMS_URL
+    CHARGE_BOX_ID  as _CFG_CHARGE_BOX_ID
     DEFAULT_ID_TAG,
     VENDOR,
     MODEL,
