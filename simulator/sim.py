@@ -122,63 +122,56 @@ def nxt(cmd: str):
 # ─── Nextion UI Güncelleme Fonksiyonları ─────────────────────────────────────
 
 def nxt_set_time():
-    """home sayfası t0 → UTC saat."""
+    """home sayfası saat → UTC saat."""
     utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    nxt(f't0.txt="{utc}"')
+    nxt(f'saat.txt="{utc}"')
 
 
 def nxt_set_connected(connected: bool):
-    """home sayfası t1 bağlantı durumu + p0 araç görseli."""
+    """home sayfası con bağlantı durumu + araba araç görseli."""
     if connected:
-        nxt('t1.txt="CONNECTED"')
-        nxt("t1.pco=1024")            # yeşil renk (Nextion 16-bit: 0x0400 = koyu yeşil)
-        nxt(f"p0.pic={PIC_CAR_CONNECTED}")
+        nxt('con.txt="CONNECTED"')
+        nxt("con.pco=1024")           # yeşil renk
+        nxt(f"araba.pic={PIC_CAR_CONNECTED}")
     else:
-        nxt('t1.txt="DISCONNECTED"')
-        nxt("t1.pco=63488")           # kırmızı renk (0xF800)
-        nxt(f"p0.pic={PIC_CAR_DISCONNECTED}")
+        nxt('con.txt="DISCONNECTED"')
+        nxt("con.pco=63488")          # kırmızı renk
+        nxt(f"araba.pic={PIC_CAR_DISCONNECTED}")
 
 
 def nxt_set_charge_percent(pct: int):
-    """home sayfası t2 → şarj yüzdesi."""
-    nxt(f't2.txt="% {pct}"')
+    """home sayfası percent → şarj yüzdesi."""
+    nxt(f'percent.txt="% {pct}"')
 
 
 def nxt_set_user_id(id_tag: str):
-    """user_info sayfası t1 → idTag."""
-    nxt(f't1.txt="{id_tag}"')
+    """user_info sayfası id → idTag."""
+    nxt(f'id.txt="{id_tag}"')
 
 
 def nxt_update_status():
     """
     status sayfası güncelle:
-      t0 → anlık güç (kW)
-      t1 → geçen süre (HH:MM:SS)
-      t2 → toplam enerji (kWh)
-      t3 → toplam ücret (TL)
+      power → anlık güç (kW)
+      time  → geçen süre (HH:MM:SS)
+      energy→ toplam enerji (kWh)
+      cost  → toplam ücret (TL)
     Şarj aktif değilse son değerleri dondurur.
     """
-    # Anlık güç: sabit (konfigürasyondaki değer)
-    power_kw = (WH_PER_STEP * (DEFAULT_CURRENT / 16)) / 1000
-    # Gerçekçi güç: V * A / 1000
     power_kw = round(DEFAULT_VOLTAGE * DEFAULT_CURRENT / 1000, 2)
-    nxt(f't0.txt="POWER : {power_kw} KW"')
+    nxt(f'power.txt="POWER : {power_kw} KW"')
 
-    # Geçen süre
     if charge_start_time is not None:
         elapsed = int(time.time() - charge_start_time)
         h = elapsed // 3600
         m = (elapsed % 3600) // 60
         s = elapsed % 60
-        nxt(f't1.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
+        nxt(f'time.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
     else:
-        nxt('t1.txt="TIME : 00:00:00"')
+        nxt('time.txt="TIME : 00:00:00"')
 
-    # Toplam enerji
-    nxt(f't2.txt="ENERGY: {round(total_energy_wh/1000, 2)} KW"')
-
-    # Toplam ücret
-    nxt(f't3.txt="COST : {round(total_cost, 2)} TL"')
+    nxt(f'energy.txt="ENERGY: {round(total_energy_wh/1000, 2)} KW"')
+    nxt(f'cost.txt="COST : {round(total_cost, 2)} TL"')
 
 
 # ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
