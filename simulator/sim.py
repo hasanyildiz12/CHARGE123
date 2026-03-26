@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-ocpp-charge-point-simulator — OCPP 1.6J Charge Point Simulator
-========================================================
-Lightweight, interactive OCPP 1.6 JSON charge-point simulator.
-Optimised for low-resource environments (tested on Raspberry Pi Zero 2 W
-with 512 MB RAM) but runs on any Python 3.9+ system.
-
-Dependency : pip install websockets
-Usage      : python simulator/OCPP-Simulator-yldz.py [CSMS_URL] [CHARGE_BOX_ID]
+ocpp-charge-point-simulator — OCPP 1.6J + Nextion 3.5" Entegrasyonu
+=====================================================================
+Raspberry Pi 3B+ · GPIO 14/15 (UART) · /dev/ttyS0 · 9600 baud
+Nextion sayfaları: home, user_info, status, rfid_scan
 """
 
 import asyncio
@@ -17,23 +13,27 @@ import sys
 import time
 from datetime import datetime, timezone
 import base64
+
 try:
     import websockets
 except ImportError:
-    print("[ERROR] 'websockets' package is missing. Install it with:  pip install websockets")
+    print("[ERROR] 'websockets' eksik. Kur:  pip install websockets")
     sys.exit(1)
 
-# ─── Import configuration ────────────────────────────────────────────────────
+try:
+    import serial
+except ImportError:
+    print("[ERROR] 'pyserial' eksik. Kur:  pip install pyserial")
+    sys.exit(1)
+
+# ─── Konfigürasyon ───────────────────────────────────────────────────────────
 
 sys.path.insert(0, ".")
-from config.config import (
-    CSMS_URL       as _CFG_CSMS_URL
-    CHARGE_BOX_ID  as _CFG_CHARGE_BOX_ID
+from config import (
+    CSMS_URL,
+    CHARGE_BOX_ID,
     DEFAULT_ID_TAG,
-    VENDOR,
-    MODEL,
-    SERIAL,
-    FIRMWARE,
+    VENDOR, MODEL, SERIAL, FIRMWARE,
     HEARTBEAT_INTERVAL,
     METER_INCREMENT_WH,
     DEFAULT_VOLTAGE,
@@ -42,12 +42,16 @@ from config.config import (
     PING_INTERVAL,
     BASIC_AUTH_USER,
     BASIC_AUTH_PASSWORD,
+    NEXTION_PORT,
+    NEXTION_BAUDRATE,
+    PIC_CAR_CONNECTED,
+    PIC_CAR_DISCONNECTED,
+    WH_PER_STEP,
+    PERCENT_PER_STEP,
+    TL_PER_500WH,
 )
 
 # ─── Runtime State ────────────────────────────────────────────────────────────
-
-CSMS_URL       = _CFG_CSMS_URL,
-CHARGE_BOX_ID  = _CFG_CHARGE_BOX_ID,
 
 msg_id         = 1
 transaction_id = None
@@ -55,7 +59,17 @@ meter_wh       = 0
 hb_interval    = HEARTBEAT_INTERVAL
 hb_task        = None
 
-# ─── Colour Helpers (ANSI) ────────────────────────────────────────────────────
+# Şarj durumu
+charge_percent    = 0        # %0 - %100
+charge_start_time = None     # şarj başladığında set edilir
+charging_active   = False    # şarj devam ediyor mu?
+total_cost        = 0.0      # toplam ücret (TL)
+total_energy_wh   = 0        # toplam çekilen enerji (Wh)
+
+# Bağlantı durumu
+is_connected = False
+
+# ─── ANSI Renk Kodları ────────────────────────────────────────────────────────
 
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
@@ -67,7 +81,6 @@ DIM    = "\033[2m"
 
 
 def _ts() -> str:
-    """Short timestamp for log lines."""
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
@@ -77,7 +90,98 @@ def log(direction: str, msg: str):
     print(f"{DIM}{_ts()}{RESET}  {c}{BOLD}{direction:<4}{RESET}  {msg}")
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# ─── Nextion Serial Bağlantısı ────────────────────────────────────────────────
+
+_nxt_serial = None
+
+def nextion_open():
+    """Serial portu aç. Hata olursa uyar ama çökme."""
+    global _nxt_serial
+    try:
+        _nxt_serial = serial.Serial(
+            NEXTION_PORT,
+            NEXTION_BAUDRATE,
+            timeout=0.1
+        )
+        log("INFO", f"Nextion bağlandı → {NEXTION_PORT} @ {NEXTION_BAUDRATE}")
+    except Exception as e:
+        log("WARN", f"Nextion açılamadı: {e} — ekran komutları devre dışı")
+        _nxt_serial = None
+
+
+def nxt(cmd: str):
+    """Nextion'a komut gönder. Her komut \xff\xff\xff ile biter."""
+    if _nxt_serial is None:
+        return
+    try:
+        _nxt_serial.write((cmd + "\xff\xff\xff").encode("latin-1"))
+    except Exception as e:
+        log("WARN", f"Nextion yazma hatası: {e}")
+
+
+# ─── Nextion UI Güncelleme Fonksiyonları ─────────────────────────────────────
+
+def nxt_set_time():
+    """home sayfası t0 → UTC saat."""
+    utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    nxt(f't0.txt="{utc}"')
+
+
+def nxt_set_connected(connected: bool):
+    """home sayfası t1 bağlantı durumu + p0 araç görseli."""
+    if connected:
+        nxt('t1.txt="CONNECTED"')
+        nxt("t1.pco=1024")            # yeşil renk (Nextion 16-bit: 0x0400 = koyu yeşil)
+        nxt(f"p0.pic={PIC_CAR_CONNECTED}")
+    else:
+        nxt('t1.txt="DISCONNECTED"')
+        nxt("t1.pco=63488")           # kırmızı renk (0xF800)
+        nxt(f"p0.pic={PIC_CAR_DISCONNECTED}")
+
+
+def nxt_set_charge_percent(pct: int):
+    """home sayfası t2 → şarj yüzdesi."""
+    nxt(f't2.txt="% {pct}"')
+
+
+def nxt_set_user_id(id_tag: str):
+    """user_info sayfası t1 → idTag."""
+    nxt(f't1.txt="{id_tag}"')
+
+
+def nxt_update_status():
+    """
+    status sayfası güncelle:
+      t0 → anlık güç (kW)
+      t1 → geçen süre (HH:MM:SS)
+      t2 → toplam enerji (kWh)
+      t3 → toplam ücret (TL)
+    Şarj aktif değilse son değerleri dondurur.
+    """
+    # Anlık güç: sabit (konfigürasyondaki değer)
+    power_kw = (WH_PER_STEP * (DEFAULT_CURRENT / 16)) / 1000
+    # Gerçekçi güç: V * A / 1000
+    power_kw = round(DEFAULT_VOLTAGE * DEFAULT_CURRENT / 1000, 2)
+    nxt(f't0.txt="POWER : {power_kw} KW"')
+
+    # Geçen süre
+    if charge_start_time is not None:
+        elapsed = int(time.time() - charge_start_time)
+        h = elapsed // 3600
+        m = (elapsed % 3600) // 60
+        s = elapsed % 60
+        nxt(f't1.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
+    else:
+        nxt('t1.txt="TIME : 00:00:00"')
+
+    # Toplam enerji
+    nxt(f't2.txt="ENERGY: {round(total_energy_wh/1000, 2)} KW"')
+
+    # Toplam ücret
+    nxt(f't3.txt="COST : {round(total_cost, 2)} TL"')
+
+
+# ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
 
 def next_id() -> str:
     global msg_id
@@ -90,7 +194,7 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-# ─── Low-level Send ──────────────────────────────────────────────────────────
+# ─── OCPP Gönderme ───────────────────────────────────────────────────────────
 
 async def send(ws, action: str, payload: dict) -> str:
     mid = next_id()
@@ -106,7 +210,7 @@ async def send_result(ws, mid: str, payload: dict):
     log("SEND", f"[Response/{mid}] {payload}")
 
 
-# ─── OCPP 1.6 Messages (Charge Point → CSMS) ────────────────────────────────
+# ─── OCPP 1.6 Mesajları ──────────────────────────────────────────────────────
 
 async def boot_notification(ws):
     await send(ws, "BootNotification", {
@@ -135,7 +239,14 @@ async def authorize(ws, id_tag: str = DEFAULT_ID_TAG):
 
 
 async def start_transaction(ws, id_tag: str = DEFAULT_ID_TAG):
-    global meter_wh
+    global meter_wh, charging_active, charge_start_time, charge_percent
+    global total_energy_wh, total_cost
+    charge_start_time = time.time()
+    charging_active   = True
+    charge_percent    = 0
+    total_energy_wh   = 0
+    total_cost        = 0.0
+    nxt_set_charge_percent(0)
     await send(ws, "StartTransaction", {
         "connectorId": 1,
         "idTag":       id_tag,
@@ -145,10 +256,11 @@ async def start_transaction(ws, id_tag: str = DEFAULT_ID_TAG):
 
 
 async def stop_transaction(ws):
-    global transaction_id, meter_wh
+    global transaction_id, meter_wh, charging_active
     if transaction_id is None:
-        log("WARN", "No active transaction!")
+        log("WARN", "Aktif işlem yok!")
         return
+    charging_active = False
     await send(ws, "StopTransaction", {
         "transactionId": transaction_id,
         "idTag":         DEFAULT_ID_TAG,
@@ -156,31 +268,50 @@ async def stop_transaction(ws):
         "timestamp":     iso_now(),
         "reason":        "Local",
     })
+    # Status sayfasını dondur (son değerler kalır)
+    nxt_update_status()
+    log("INFO", f"Şarj durduruldu — Toplam: {total_energy_wh} Wh, {round(total_cost,2)} TL")
 
 
 async def meter_values(ws):
-    global meter_wh, transaction_id
-    meter_wh += METER_INCREMENT_WH
+    """MeterValues gönder ve Nextion'ı güncelle."""
+    global meter_wh, transaction_id, charge_percent, total_energy_wh, total_cost
+
+    if not charging_active:
+        log("WARN", "Şarj aktif değil — MeterValues gönderilmedi")
+        return
+
+    meter_wh        += METER_INCREMENT_WH
+    charge_percent  = min(charge_percent + PERCENT_PER_STEP, 100)
+    total_energy_wh += WH_PER_STEP
+    total_cost      += TL_PER_500WH
+
     payload = {
         "connectorId": 1,
         "meterValue": [{
             "timestamp": iso_now(),
             "sampledValue": [
-                {"value": str(meter_wh), "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
-                {"value": str(DEFAULT_VOLTAGE), "measurand": "Voltage", "unit": "V"},
-                {"value": str(DEFAULT_CURRENT), "measurand": "Current.Import", "unit": "A"},
+                {"value": str(meter_wh),        "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
+                {"value": str(DEFAULT_VOLTAGE),  "measurand": "Voltage",        "unit": "V"},
+                {"value": str(DEFAULT_CURRENT),  "measurand": "Current.Import", "unit": "A"},
             ]
         }]
     }
     if transaction_id:
         payload["transactionId"] = transaction_id
+
     await send(ws, "MeterValues", payload)
 
+    # Nextion güncelle
+    nxt_set_charge_percent(charge_percent)
+    nxt_update_status()
+    log("INFO", f"Şarj: %{charge_percent} | Enerji: {total_energy_wh} Wh | Ücret: {total_cost:.2f} TL")
 
-# ─── Heartbeat Scheduler ─────────────────────────────────────────────────────
+
+# ─── Periyodik Görevler ───────────────────────────────────────────────────────
 
 async def heartbeat_loop(ws, interval: int):
-    log("INFO", f"Heartbeat started — every {interval}s")
+    log("INFO", f"Heartbeat başladı — her {interval}s")
     while True:
         await asyncio.sleep(interval)
         try:
@@ -189,26 +320,40 @@ async def heartbeat_loop(ws, interval: int):
             break
 
 
-# ─── Incoming Message Handler ─────────────────────────────────────────────────
+async def clock_loop():
+    """Her saniye Nextion home sayfasındaki saati güncelle."""
+    while True:
+        nxt_set_time()
+        await asyncio.sleep(1)
+
+
+async def status_update_loop():
+    """Şarj aktifken her 2 saniyede status sayfasını güncelle."""
+    while True:
+        if charging_active:
+            nxt_update_status()
+        await asyncio.sleep(2)
+
+
+# ─── Gelen Mesaj İşleyici ─────────────────────────────────────────────────────
 
 async def handle_message(ws, raw: str):
-    global transaction_id, hb_interval, hb_task
+    global transaction_id, hb_interval, hb_task, is_connected
 
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
-        log("ERR", f"JSON parse error: {raw}")
+        log("ERR", f"JSON parse hatası: {raw}")
         return
 
     msg_type = msg[0]
     mid      = msg[1]
 
-    # ── CALLRESULT (3) — response to our request ─────────────────────────────
     if msg_type == 3:
         payload = msg[2]
         log("RECV", f"[Response/{mid}] {payload}")
 
-        # BootNotification response → update heartbeat interval
+        # BootNotification → heartbeat aralığı güncelle
         if "interval" in payload and "status" in payload:
             status   = payload["status"]
             interval = payload.get("interval", hb_interval)
@@ -219,16 +364,15 @@ async def handle_message(ws, raw: str):
                     hb_task.cancel()
                 hb_task = asyncio.create_task(heartbeat_loop(ws, hb_interval))
 
-        # StartTransaction response → store transactionId
+        # StartTransaction → transactionId kaydet
         if "transactionId" in payload:
             transaction_id = payload["transactionId"]
-            log("INFO", f"Transaction started: ID={transaction_id}")
+            log("INFO", f"Transaction ID={transaction_id}")
 
-    # ── CALL (2) — request from CSMS ─────────────────────────────────────────
     elif msg_type == 2:
         action  = msg[2]
         payload = msg[3] if len(msg) > 3 else {}
-        log("RECV", f"[{action}] ← Server: {payload}")
+        log("RECV", f"[{action}] ← Sunucu: {payload}")
 
         responses = {
             "GetConfiguration":       {"configurationKey": [], "unknownKey": []},
@@ -240,35 +384,34 @@ async def handle_message(ws, raw: str):
             "UnlockConnector":        {"status": "Unlocked"},
             "ClearCache":             {"status": "Accepted"},
         }
-        response = responses.get(action, {})
-        await send_result(ws, mid, response)
+        await send_result(ws, mid, responses.get(action, {}))
 
-    # ── CALLERROR (4) ─────────────────────────────────────────────────────────
     elif msg_type == 4:
         log("ERR", f"CALLERROR [{mid}]: {msg[2]} — {msg[3]}")
 
 
-# ─── Interactive Console ──────────────────────────────────────────────────────
+# ─── Konsol Menüsü ────────────────────────────────────────────────────────────
 
 def print_menu():
     print(f"""
-{BOLD}{CYAN}┌─────────────────────────────────────────┐{RESET}
-{BOLD}{CYAN}│ ocpp-charge-point-simulator · OCPP 1.6J  │{RESET}
-{BOLD}{CYAN}└─────────────────────────────────────────┘{RESET}
+{BOLD}{CYAN}┌──────────────────────────────────────────────┐{RESET}
+{BOLD}{CYAN}│  OCPP 1.6J Simülatör · Nextion Entegrasyonu  │{RESET}
+{BOLD}{CYAN}└──────────────────────────────────────────────┘{RESET}
   {BOLD}1{RESET}  BootNotification
   {BOLD}2{RESET}  Heartbeat (manual)
   {BOLD}3{RESET}  StatusNotification → Available
   {BOLD}4{RESET}  StatusNotification → Charging
   {BOLD}5{RESET}  Authorize ({DEFAULT_ID_TAG})
-  {BOLD}6{RESET}  StartTransaction
-  {BOLD}7{RESET}  MeterValues
-  {BOLD}8{RESET}  StopTransaction
-  {BOLD}q{RESET}  Quit
+  {BOLD}6{RESET}  StartTransaction   [şarjı başlat]
+  {BOLD}7{RESET}  MeterValues        [+500 Wh, +%5]
+  {BOLD}8{RESET}  StopTransaction    [şarjı durdur]
+  {BOLD}u{RESET}  UserInfo sayfasına idTag gönder
+  {BOLD}m{RESET}  Menüyü göster
+  {BOLD}q{RESET}  Çıkış
 """)
 
 
 async def console_input(ws):
-    """Async console input — runs as a separate task."""
     loop = asyncio.get_event_loop()
     print_menu()
     while True:
@@ -276,91 +419,108 @@ async def console_input(ws):
             choice = await loop.run_in_executor(None, input, f"\n{BOLD}>{RESET} ")
             choice = choice.strip().lower()
 
-            actions = {
-                "1": lambda: boot_notification(ws),
-                "2": lambda: heartbeat(ws),
-                "3": lambda: status_notification(ws, 1, "Available"),
-                "4": lambda: status_notification(ws, 1, "Charging"),
-                "5": lambda: authorize(ws),
-                "6": lambda: start_transaction(ws),
-                "7": lambda: meter_values(ws),
-                "8": lambda: stop_transaction(ws),
-            }
-
-            if choice in actions:
-                await actions[choice]()
+            if choice == "1":
+                await boot_notification(ws)
+            elif choice == "2":
+                await heartbeat(ws)
+            elif choice == "3":
+                await status_notification(ws, 1, "Available")
+            elif choice == "4":
+                await status_notification(ws, 1, "Charging")
+            elif choice == "5":
+                await authorize(ws)
+            elif choice == "6":
+                await start_transaction(ws)
+            elif choice == "7":
+                await meter_values(ws)
+            elif choice == "8":
+                await stop_transaction(ws)
+            elif choice == "u":
+                nxt_set_user_id(DEFAULT_ID_TAG)
+                log("INFO", f"Nextion user_info güncellendi: {DEFAULT_ID_TAG}")
             elif choice in ("q", "quit", "exit"):
-                log("INFO", "Shutting down...")
+                log("INFO", "Çıkılıyor...")
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
             else:
-                log("WARN", f"Unknown command: '{choice}' — press 'm' for menu")
+                log("WARN", f"Bilinmeyen komut: '{choice}' — 'm' ile menüye bak")
 
         except (EOFError, KeyboardInterrupt):
             break
 
 
-# ─── Receive Loop ─────────────────────────────────────────────────────────────
+# ─── Alma Döngüsü ─────────────────────────────────────────────────────────────
 
 async def recv_loop(ws):
-    """Continuously listen for incoming WebSocket messages."""
     try:
         async for message in ws:
             await handle_message(ws, message)
     except websockets.exceptions.ConnectionClosed as e:
-        log("WARN", f"Connection closed: code={e.code}")
+        log("WARN", f"Bağlantı kapandı: code={e.code}")
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Ana Fonksiyon ────────────────────────────────────────────────────────────
 
 async def main():
-    global hb_task
+    global hb_task, is_connected
 
-    print(f"\n{BOLD}ocpp-charge-point-simulator · OCPP 1.6J Charge Point Simulator{RESET}")
-    print(f"{DIM}Connecting to: {CSMS_URL}{RESET}\n")
+    print(f"\n{BOLD}OCPP 1.6J Simülatör · Nextion 3.5\" Entegrasyonu{RESET}")
+    print(f"{DIM}Bağlanılıyor: {CSMS_URL}{RESET}\n")
 
-    # Graceful shutdown
+    # Nextion portu aç
+    nextion_open()
+
+    # Başlangıç ekran durumu
+    nxt_set_connected(False)
+    nxt_set_charge_percent(0)
+    nxt_set_time()
+
     def handle_sigint(*_):
-        log("INFO", "Ctrl+C — disconnecting...")
+        log("INFO", "Ctrl+C — bağlantı kesiliyor...")
+        nxt_set_connected(False)
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_sigint)
 
     try:
-        # DOĞRU:
-        _credentials = base64.b64encode(f"{BASIC_AUTH_USER}:{BASIC_AUTH_PASSWORD}".encode()).decode()
+        _credentials = base64.b64encode(
+            f"{BASIC_AUTH_USER}:{BASIC_AUTH_PASSWORD}".encode()
+        ).decode()
+
         async with websockets.connect(
             CSMS_URL,
             subprotocols=[SUBPROTOCOL],
             ping_interval=PING_INTERVAL,
             extra_headers={"Authorization": f"Basic {_credentials}"},
         ) as ws:
-            log("INFO", f"Connected ✓  ({CSMS_URL})")
+            is_connected = True
+            log("INFO", f"Bağlandı ✓  ({CSMS_URL})")
 
-            # Auto-send BootNotification on connect
+            # Nextion'ı güncelle
+            nxt_set_connected(True)
+            nxt_set_user_id(DEFAULT_ID_TAG)
+
+            # Otomatik BootNotification
             await boot_notification(ws)
 
-            # Run receiver + interactive console in parallel
-            recv_task  = asyncio.create_task(recv_loop(ws))
-            input_task = asyncio.create_task(console_input(ws))
+            # Paralel görevler
+            recv_task    = asyncio.create_task(recv_loop(ws))
+            input_task   = asyncio.create_task(console_input(ws))
+            clock_task   = asyncio.create_task(clock_loop())
+            status_task  = asyncio.create_task(status_update_loop())
 
-            await asyncio.gather(recv_task, input_task)
+            await asyncio.gather(recv_task, input_task, clock_task, status_task)
 
     except OSError as e:
-        log("ERR", f"Connection failed: {e}")
-        log("INFO", "Is your CSMS running? Is the URL correct?")
+        log("ERR", f"Bağlantı başarısız: {e}")
+        log("INFO", "CSMS çalışıyor mu? URL doğru mu?")
+        nxt_set_connected(False)
     except Exception as e:
-        log("ERR", f"Unexpected error: {e}")
+        log("ERR", f"Beklenmeyen hata: {e}")
+        nxt_set_connected(False)
 
 
-# ─── Entry Point ──────────────────────────────────────────────────────────────
+# ─── Giriş Noktası ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 2:
-        CSMS_URL = sys.argv[1]
-    if len(sys.argv) >= 3:
-        CHARGE_BOX_ID = sys.argv[2]
-        parts = CSMS_URL.rsplit("/", 1)
-        CSMS_URL = parts[0] + "/" + CHARGE_BOX_ID
-
     asyncio.run(main())

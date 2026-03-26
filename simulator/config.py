@@ -5,25 +5,22 @@ Edit this file to match your CSMS setup.
 """
 
 # ─── CSMS Connection ─────────────────────────────────────────────────────────
-# Replace with your own CSMS WebSocket URL.
-# Format: ws://<host>:<port>/<path>/<CHARGE_BOX_ID>
 
-CSMS_URL = _CFG_CSMS_URL
+CSMS_URL      = "wss://hasan-7fap.powerfill.app/ws/CP-1"
+CHARGE_BOX_ID = "CP-1"
 
 # ─── Charge Point Identity ───────────────────────────────────────────────────
 
-CHARGE_BOX_ID  = _CFG_CHARGE_BOX_ID
-VENDOR         = "TestVendor"
-MODEL          = "TestModel"
-SERIAL         = "SN-001"
-FIRMWARE       = "1.0.0"
+VENDOR   = "TestVendor"
+MODEL    = "TestModel"
+SERIAL   = "SN-001"
+FIRMWARE = "1.0.0"
 
 # ─── Authentication ──────────────────────────────────────────────────────────
-# Default RFID / idTag used for Authorize, StartTransaction, StopTransaction.
 
-DEFAULT_ID_TAG = "DEFAULT_ID_TAG"
-BASIC_AUTH_USER     = "CHARGE_BOX_ID"              # Charger ID
-BASIC_AUTH_PASSWORD = "16-TO-20-DIGIT-PASSWORD"    # CSMS PASSWORD
+DEFAULT_ID_TAG      = "hasanyildizidtag"
+BASIC_AUTH_USER     = "CP-1"
+BASIC_AUTH_PASSWORD = "1234567890asdfgh"
 
 # ─── Heartbeat ───────────────────────────────────────────────────────────────
 
@@ -31,7 +28,7 @@ HEARTBEAT_INTERVAL = 30  # seconds (overridden by BootNotification response)
 
 # ─── Meter Simulation ────────────────────────────────────────────────────────
 
-METER_INCREMENT_WH = 500   # Wh added on every MeterValues call
+METER_INCREMENT_WH = 500   # Wh added on every MeterValues call  →  %5 = 500 Wh
 DEFAULT_VOLTAGE    = 230   # V
 DEFAULT_CURRENT    = 16    # A
 
@@ -39,3 +36,26 @@ DEFAULT_CURRENT    = 16    # A
 
 SUBPROTOCOL   = "ocpp1.6"
 PING_INTERVAL = None  # Managed by our own heartbeat loop
+
+# ─── Nextion Display ─────────────────────────────────────────────────────────
+
+NEXTION_PORT     = "/dev/ttyS0"   # GPIO 14 (TX) / GPIO 15 (RX)
+NEXTION_BAUDRATE = 9600
+
+# ─── Nextion Picture IDs ─────────────────────────────────────────────────────
+# Görseller ID:
+#   0  → yeşil araç (bağlı)
+#   3  → kırmızı araç (bağlı değil)
+#   5,6,7 → RFID animasyon kareleri (rfid_scan sayfası)
+
+PIC_CAR_CONNECTED    = 0
+PIC_CAR_DISCONNECTED = 3
+PIC_RFID_FRAMES      = [5, 6, 7]
+
+# ─── Şarj / Ücretlendirme ────────────────────────────────────────────────────
+# 500 Wh  → %5 şarj artışı
+# 500 Wh  → 5 TL
+
+WH_PER_STEP        = 500    # Her MeterValues çağrısında eklenen Wh
+PERCENT_PER_STEP   = 5      # Her adımdaki şarj yüzdesi artışı
+TL_PER_500WH       = 5.0    # 500 Wh başına ücret (TL)
