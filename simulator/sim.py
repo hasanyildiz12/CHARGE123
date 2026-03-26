@@ -11,8 +11,10 @@ import json
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import base64
+
+TZ_TR = timezone(timedelta(hours=3))
 
 try:
     import websockets
@@ -122,21 +124,27 @@ def nxt(cmd: str):
 # ─── Nextion UI Güncelleme Fonksiyonları ─────────────────────────────────────
 
 def nxt_set_time():
-    """home sayfası saat → UTC saat."""
-    utc = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    nxt(f'saat.txt="{utc}"')
+    """home sayfası saat → TR saati (UTC+3)."""
+    tr = datetime.now(TZ_TR).strftime("%H:%M:%S")
+    nxt(f'saat.txt="{tr}"')
 
 
-def nxt_set_connected(connected: bool):
-    """home sayfası con bağlantı durumu + araba araç görseli."""
-    if connected:
-        nxt('con.txt="CONNECTED"')
-        nxt("con.pco=1024")           # yeşil renk
-        nxt(f"araba.pic={PIC_CAR_CONNECTED}")
-    else:
-        nxt('con.txt="DISCONNECTED"')
-        nxt("con.pco=63488")          # kırmızı renk
-        nxt(f"araba.pic={PIC_CAR_DISCONNECTED}")
+def nxt_set_status(status: str):
+    """
+    home sayfası con objesi + araba görseli.
+    status: 'NOT CONNECTED' | 'CONNECTED' | 'AVAILABLE' | 'CHARGING'
+    """
+    colors = {
+        "NOT CONNECTED": 63488,   # kırmızı  0xF800
+        "CONNECTED":     1024,    # yeşil    0x0400
+        "AVAILABLE":     2016,    # açık yeşil 0x07E0
+        "CHARGING":      2047,    # cyan     0x07FF
+    }
+    pic = PIC_CAR_CONNECTED if status != "NOT CONNECTED" else PIC_CAR_DISCONNECTED
+    pco = colors.get(status, 63488)
+    nxt(f'con.txt="{status}"')
+    nxt(f"con.pco={pco}")
+    nxt(f"araba.pic={pic}")
 
 
 def nxt_set_charge_percent(pct: int):
@@ -152,10 +160,10 @@ def nxt_set_user_id(id_tag: str):
 def nxt_update_status():
     """
     status sayfası güncelle:
-      power → anlık güç (kW)
-      time  → geçen süre (HH:MM:SS)
-      energy→ toplam enerji (kWh)
-      cost  → toplam ücret (TL)
+      power  → anlık güç (kW) = V × A / 1000, sabit
+      time   → geçen süre (HH:MM:SS), her saniye artar
+      energy → toplam çekilen enerji (kWh) = kW × geçen_saat, gerçek zamanlı
+      cost   → toplam ücret (TL)
     Şarj aktif değilse son değerleri dondurur.
     """
     power_kw = round(DEFAULT_VOLTAGE * DEFAULT_CURRENT / 1000, 2)
@@ -167,11 +175,18 @@ def nxt_update_status():
         m = (elapsed % 3600) // 60
         s = elapsed % 60
         nxt(f'time.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
+
+        # Enerji: kW × geçen süre (saat cinsinden) — gerçek zamanlı
+        energy_kwh = round(power_kw * elapsed / 3600, 4)
+        nxt(f'energy.txt="ENERGY: {energy_kwh} kWh"')
+
+        # Ücret: her 500 Wh = 5 TL oranıyla gerçek zamanlı
+        cost = round((energy_kwh * 1000 / WH_PER_STEP) * TL_PER_500WH, 2)
+        nxt(f'cost.txt="COST : {cost} TL"')
     else:
         nxt('time.txt="TIME : 00:00:00"')
-
-    nxt(f'energy.txt="ENERGY: {round(total_energy_wh/1000, 2)} KW"')
-    nxt(f'cost.txt="COST : {round(total_cost, 2)} TL"')
+        nxt('energy.txt="ENERGY: 0.0000 kWh"')
+        nxt('cost.txt="COST : 0.00 TL"')
 
 
 # ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
@@ -184,7 +199,7 @@ def next_id() -> str:
 
 
 def iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(TZ_TR).isoformat().replace("+03:00", "Z")
 
 
 # ─── OCPP Gönderme ───────────────────────────────────────────────────────────
@@ -225,6 +240,8 @@ async def status_notification(ws, connector_id: int, status: str, error_code: st
         "errorCode":   error_code,
         "timestamp":   iso_now(),
     })
+    # Nextion con objesini OCPP status ile güncelle
+    nxt_set_status(status.upper())
 
 
 async def authorize(ws, id_tag: str = DEFAULT_ID_TAG):
@@ -321,11 +338,11 @@ async def clock_loop():
 
 
 async def status_update_loop():
-    """Şarj aktifken her 2 saniyede status sayfasını güncelle."""
+    """Şarj aktifken her saniye status sayfasını güncelle."""
     while True:
         if charging_active:
             nxt_update_status()
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
 
 # ─── Gelen Mesaj İşleyici ─────────────────────────────────────────────────────
@@ -398,7 +415,6 @@ def print_menu():
   {BOLD}6{RESET}  StartTransaction   [şarjı başlat]
   {BOLD}7{RESET}  MeterValues        [+500 Wh, +%5]
   {BOLD}8{RESET}  StopTransaction    [şarjı durdur]
-  {BOLD}u{RESET}  UserInfo sayfasına idTag gönder
   {BOLD}m{RESET}  Menüyü göster
   {BOLD}q{RESET}  Çıkış
 """)
@@ -428,11 +444,9 @@ async def console_input(ws):
                 await meter_values(ws)
             elif choice == "8":
                 await stop_transaction(ws)
-            elif choice == "u":
-                nxt_set_user_id(DEFAULT_ID_TAG)
-                log("INFO", f"Nextion user_info güncellendi: {DEFAULT_ID_TAG}")
             elif choice in ("q", "quit", "exit"):
                 log("INFO", "Çıkılıyor...")
+                nxt_set_status("NOT CONNECTED")
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
@@ -465,13 +479,13 @@ async def main():
     nextion_open()
 
     # Başlangıç ekran durumu
-    nxt_set_connected(False)
+    nxt_set_status("NOT CONNECTED")
     nxt_set_charge_percent(0)
     nxt_set_time()
 
     def handle_sigint(*_):
         log("INFO", "Ctrl+C — bağlantı kesiliyor...")
-        nxt_set_connected(False)
+        nxt_set_status("NOT CONNECTED")
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_sigint)
 
@@ -489,9 +503,9 @@ async def main():
             is_connected = True
             log("INFO", f"Bağlandı ✓  ({CSMS_URL})")
 
-            # Nextion'ı güncelle
-            nxt_set_connected(True)
-            nxt_set_user_id(DEFAULT_ID_TAG)
+            # Nextion'ı güncelle — bağlantı kurulunca otomatik
+            nxt_set_status("CONNECTED")
+            nxt_set_user_id(DEFAULT_ID_TAG)   # user_info sayfası id objesi kalıcı yazılır
 
             # Otomatik BootNotification
             await boot_notification(ws)
@@ -507,10 +521,10 @@ async def main():
     except OSError as e:
         log("ERR", f"Bağlantı başarısız: {e}")
         log("INFO", "CSMS çalışıyor mu? URL doğru mu?")
-        nxt_set_connected(False)
+        nxt_set_status("NOT CONNECTED")
     except Exception as e:
         log("ERR", f"Beklenmeyen hata: {e}")
-        nxt_set_connected(False)
+        nxt_set_status("NOT CONNECTED")
 
 
 # ─── Giriş Noktası ────────────────────────────────────────────────────────────
