@@ -6,7 +6,7 @@ Edit this file to match your CSMS setup.
 
 # ─── CSMS Connection ─────────────────────────────────────────────────────────
 
-CSMS_URL      = "ws://localhost:8180/steve/websocket/CentralSystemService/CP-1"
+CSMS_URL      = "wss://hasan-7fap.powerfill.app/ws/CP-1"
 CHARGE_BOX_ID = "CP-1"
 
 # ─── Charge Point Identity ───────────────────────────────────────────────────
@@ -39,7 +39,7 @@ PING_INTERVAL = None  # Managed by our own heartbeat loop
 
 # ─── Nextion Display ─────────────────────────────────────────────────────────
 
-NEXTION_PORT     = "/dev/ttyS0"   # GPIO 14 (TX) / GPIO 15 (RX)
+NEXTION_PORT     = "/dev/ttyAMA0"   # GPIO 14 (TX) / GPIO 15 (RX)
 NEXTION_BAUDRATE = 9600
 
 # ─── Nextion Picture IDs ─────────────────────────────────────────────────────

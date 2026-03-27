@@ -136,8 +136,8 @@ def nxt_set_status(status: str):
     """
     colors = {
         "NOT CONNECTED": 63488,   # kırmızı  0xF800
-        "CONNECTED":     1024,    # yeşil    0x0400
-        "AVAILABLE":     2016,    # açık yeşil 0x07E0
+        "CONNECTED":     11939,    # yeşil    0x0400
+        "AVAILABLE":     11939,    # açık yeşil 0x07E0
         "CHARGING":      2047,    # cyan     0x07FF
     }
     pic = PIC_CAR_CONNECTED if status != "NOT CONNECTED" else PIC_CAR_DISCONNECTED
@@ -155,6 +155,47 @@ def nxt_set_charge_percent(pct: int):
 def nxt_set_user_id(id_tag: str):
     """user_info sayfası id → idTag."""
     nxt(f'id.txt="{id_tag}"')
+
+
+async def nextion_read_loop():
+    """Nextion'dan gelen buton olaylarını dinle (Touch Event 0x65)."""
+    loop = asyncio.get_event_loop()
+    buf  = bytearray()
+    while True:
+        if _nxt_serial is None:
+            await asyncio.sleep(0.1)
+            continue
+        try:
+            chunk = await loop.run_in_executor(None, _nxt_serial.read, 32)
+            if chunk:
+                buf.extend(chunk)
+            # 0x65 touch event paketi: [0x65, page, comp, event, 0xFF, 0xFF, 0xFF] = 7 byte
+            while len(buf) >= 7:
+                idx = buf.find(0x65)
+                if idx == -1:
+                    buf.clear()
+                    break
+                if idx > 0:
+                    del buf[:idx]
+                if len(buf) < 7:
+                    break
+                if buf[4] == 0xFF and buf[5] == 0xFF and buf[6] == 0xFF:
+                    page_id = buf[1]
+                    comp_id = buf[2]
+                    event   = buf[3]   # 0x01 = press, 0x00 = release
+                    del buf[:7]
+                    if event == 0x01:
+                        log("INFO", f"Nextion touch → page={page_id} comp={comp_id}")
+                        # useridtag butonu: hangi sayfada / component ise buraya düş
+                        # Nextion Editor'da butonun "id" değerine göre comp_id'yi eşle
+                        if comp_id == 2:   # ← useridtag butonunun component ID'si
+                            log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
+                            nxt_set_user_id(DEFAULT_ID_TAG)
+                else:
+                    del buf[:1]   # bozuk paket, bir byte atla
+        except Exception as e:
+            log("WARN", f"Nextion okuma hatası: {e}")
+            await asyncio.sleep(0.1)
 
 
 def nxt_update_status():
@@ -515,8 +556,9 @@ async def main():
             input_task   = asyncio.create_task(console_input(ws))
             clock_task   = asyncio.create_task(clock_loop())
             status_task  = asyncio.create_task(status_update_loop())
+            nextion_task = asyncio.create_task(nextion_read_loop())
 
-            await asyncio.gather(recv_task, input_task, clock_task, status_task)
+            await asyncio.gather(recv_task, input_task, clock_task, status_task, nextion_task)
 
     except OSError as e:
         log("ERR", f"Bağlantı başarısız: {e}")
