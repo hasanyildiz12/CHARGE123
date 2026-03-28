@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone, timedelta
 import base64
 
-TZ_TR = timezone(timedelta(hours=3))
+TZ_UTC = timezone.utc
 
 try:
     import websockets
@@ -124,9 +124,9 @@ def nxt(cmd: str):
 # ─── Nextion UI Güncelleme Fonksiyonları ─────────────────────────────────────
 
 def nxt_set_time():
-    """home sayfası saat → TR saati (UTC+3)."""
-    tr = datetime.now(TZ_TR).strftime("%H:%M:%S")
-    nxt(f'saat.txt="{tr}"')
+    """home sayfası saat → UTC saati."""
+    utc = datetime.now(TZ_UTC).strftime("%H:%M:%S")
+    nxt(f'saat.txt="{utc}"')
 
 
 def nxt_set_status(status: str):
@@ -240,7 +240,7 @@ def next_id() -> str:
 
 
 def iso_now() -> str:
-    return datetime.now(TZ_TR).isoformat().replace("+03:00", "Z")
+    return datetime.now(TZ_UTC).isoformat().replace("+00:00", "Z")
 
 
 # ─── OCPP Gönderme ───────────────────────────────────────────────────────────
