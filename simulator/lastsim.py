@@ -140,6 +140,7 @@ def wait_for_nfc_auth():
 # ─── Nextion Serial Bağlantısı ────────────────────────────────────────────────
 
 _nxt_serial = None
+_nxt_queue = None   # Nextion yazma kuyruğu (event loop icinde init edilir)
 
 
 def nextion_open():
@@ -151,6 +152,9 @@ def nextion_open():
             NEXTION_BAUDRATE,
             timeout=0.1
         )
+        # Önceki oturumdan kalan UART tamponunu temizle (crash önleme)
+        _nxt_serial.reset_input_buffer()
+        _nxt_serial.reset_output_buffer()
         log("INFO", f"Nextion bağlandı → {NEXTION_PORT} @ {NEXTION_BAUDRATE}")
     except Exception as e:
         log("WARN", f"Nextion açılamadı: {e} — ekran komutları devre dışı")
@@ -158,13 +162,36 @@ def nextion_open():
 
 
 def nxt(cmd: str):
-    """Nextion'a komut gönder. Her komut \xff\xff\xff ile biter."""
-    if _nxt_serial is None:
+    """
+    Nextion komutunu yazma kuyruğuna ekle (non-blocking).
+    Fiili yazma nxt_writer_loop() tarafından yapılır; komutlar arası 10ms
+    gecikme ile seri portu ve Nextion tamponu taşmaz.
+    """
+    if _nxt_serial is None or _nxt_queue is None:
         return
     try:
-        _nxt_serial.write((cmd + "\xff\xff\xff").encode("latin-1"))
-    except Exception as e:
-        log("WARN", f"Nextion yazma hatası: {e}")
+        _nxt_queue.put_nowait(cmd)
+    except Exception:
+        pass  # kuyruk dolu veya event loop yok — komutu sessizce at
+
+
+async def nxt_writer_loop():
+    """
+    Nextion seri yazma görevi (arka plan).
+
+    Kuyruktaki komutları sırayla alır, seri porta yazar ve her yazma
+    sonrasında 10ms bekler. Bu bekleme Nextion'ın 128-byte UART tamponunun
+    taşmasını ve ekranın donup çökmesini önler.
+    """
+    while True:
+        cmd = await _nxt_queue.get()
+        if _nxt_serial is not None:
+            try:
+                _nxt_serial.write((cmd + "\xff\xff\xff").encode("latin-1"))
+            except Exception as e:
+                log("WARN", f"Nextion yazma hatası: {e}")
+        await asyncio.sleep(0.010)   # 10ms: Nextion minimum komutlar arası bekleme
+        _nxt_queue.task_done()
 
 
 # ─── Nextion UI Güncelleme Fonksiyonları ─────────────────────────────────────
@@ -585,13 +612,21 @@ async def recv_loop(ws):
 # ─── Ana Fonksiyon ────────────────────────────────────────────────────────────
 
 async def main():
-    global hb_task, is_connected
+    global hb_task, is_connected, _nxt_queue
 
     print(f"\n{BOLD}OCPP 1.6J Simülatör · Nextion 3.5\" Entegrasyonu{RESET}")
     print(f"{DIM}Bağlanılıyor: {CSMS_URL}{RESET}\n")
 
+    # ── Nextion yazma kuyruğu ve arka plan yazıcı görevi başlat ────────────
+    # Event loop içinde oluşturulmalı → main() başında initialize edilir.
+    _nxt_queue = asyncio.Queue(maxsize=64)
+    asyncio.create_task(nxt_writer_loop())   # arka planda sonsuza kadar çalışır
+
     # Nextion portu aç
     nextion_open()
+    # Seri hattın oturması + tampon temizliğinin etkili olması için bekleme.
+    # Bu 300ms olmadan ilk komutlar hizasız gönderilip crash'e neden olabilir.
+    await asyncio.sleep(0.3)
 
     # ── Başlangıç ekran durumu ──────────────────────────────────────────────
     # user_info sayfası: config'den okunan DEFAULT_ID_TAG, her başlatmada yazılır
