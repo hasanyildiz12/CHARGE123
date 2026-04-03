@@ -212,15 +212,18 @@ def nxt_set_time():
     """
     Home sayfası saat → UTC saati.
 
-    NEDEN PAGE-QUALIFIED: Nextion'da bileşen adları yalnızca aktif
-    sayfada geçerlidir. Başka sayfadan home'a dönüldüğünde yeni komut
-    gelmezse saat dondurulmuş gibi görünür.
-    Çözüm: page0.saat.txt=... yazınca Nextion sayfadan bağımsız
-    background RAM'e yazar; home sayfasına girildiğinde bileşen bu
-    değerden yüklenir ve saat sürekli çalışıyor görünür.
+    Nextion'da page-qualified yazma (page0.saat.txt) yalnızca o sayfa
+    bellekte global attribute olarak işaretliyse çalışır. Garanti için:
+      1) page0.saat.txt  → background RAM yazma (sayfa aktif olmasa da)
+      2) saat.txt        → aktif sayfada anında güncelle (home'daysa görünür)
+    Bu çift yazma sayesinde saat hangi sayfadan home'a dönülürse dönülsün
+    doğru değerde görünür ve her saniye güncellenir.
     """
     utc = datetime.now(TZ_UTC).strftime("%H:%M:%S")
     nxt(f'page0.saat.txt="{utc}"')
+    # Aktif sayfa home ise direkt bileşene de yaz (anında güncelle)
+    if _nxt_current_page == NXT_PAGE_HOME:
+        nxt(f'saat.txt="{utc}"')
 
 
 def nxt_set_status(status: str):
@@ -245,25 +248,36 @@ def nxt_set_status(status: str):
     }
     pic = PIC_CAR_DISCONNECTED if status in ("NOT CONNECTED", "UNAVAILABLE") else PIC_CAR_CONNECTED
     pco = colors.get(status, 63488)
+    # Page-qualified → background RAM'e yaz (sayfa aktif olmasa da)
     nxt(f'page0.con.txt="{status}"')
     nxt(f"page0.con.pco={pco}")
     nxt(f"page0.araba.pic={pic}")
+    # Aktif sayfa home ise direkt bileşene de yaz (anında güncelle)
+    if _nxt_current_page == NXT_PAGE_HOME:
+        nxt(f'con.txt="{status}"')
+        nxt(f"con.pco={pco}")
+        nxt(f"araba.pic={pic}")
 
 
 def nxt_set_charge_percent(pct: int):
-    """Home sayfası percent → şarj yüzdesi (page-qualified)."""
+    """Home sayfası percent → şarj yüzdesi.
+    Çift yazma: page0 prefix (RAM) + direkt (home sayfasındaysa anında görünür)."""
     nxt(f'page0.percent.txt="% {pct}"')
+    if _nxt_current_page == NXT_PAGE_HOME:
+        nxt(f'percent.txt="% {pct}"')
 
 
 def nxt_set_user_id(id_tag: str):
     """
     user_info sayfası id.txt → idTag.
 
-    page1.id.txt=... ile user_info sayfasının background RAM'i güncellenir;
-    kullanıcı user_info sayfasına girdiğinde id değeri hazır olur.
-    Ayrıca o an user_info sayfasındaysa anında görünür.
+    Çift yazma stratejisi:
+      1) page1.id.txt=... → background RAM (her sayfadan güncelle)
+      2) id.txt=...       → aktif sayfada anında güncelle (user_info sayfasındaysa görünür)
     """
     nxt(f'page1.id.txt="{id_tag}"')
+    if _nxt_current_page == NXT_PAGE_USER_INFO:
+        nxt(f'id.txt="{id_tag}"')
 
 
 async def nextion_read_loop():
@@ -309,6 +323,14 @@ async def nextion_read_loop():
                                 if new_page == NXT_PAGE_USER_INFO:
                                     log("INFO", f"user_info sayfası → id yazılıyor: {DEFAULT_ID_TAG}")
                                     nxt_set_user_id(DEFAULT_ID_TAG)
+                                # home sayfasına dönüldü → saat + durum + percent anında güncelle
+                                elif new_page == NXT_PAGE_HOME:
+                                    log("INFO", "home sayfasına dönüldü → saat/durum/percent yenileniyor")
+                                    nxt_set_time()
+                                # status sayfasına girildi → tüm değerleri anında güncelle
+                                elif new_page == NXT_PAGE_STATUS:
+                                    log("INFO", "status sayfasına girildi → veriler yenileniyor")
+                                    nxt_update_status()
                             continue
                         else:
                             del buf[:1]   # bozuk 0x66 paketi, atla
@@ -360,6 +382,9 @@ def nxt_update_status():
     """
     power_kw = round(DEFAULT_VOLTAGE * DEFAULT_CURRENT / 1000, 2)
     nxt(f'page2.power.txt="POWER : {power_kw} KW"')
+    on_status_page = (_nxt_current_page == NXT_PAGE_STATUS)
+    if on_status_page:
+        nxt(f'power.txt="POWER : {power_kw} KW"')
 
     if charge_start_time is not None:
         elapsed = int(time.time() - charge_start_time)   # saniye cinsinden
@@ -375,10 +400,20 @@ def nxt_update_status():
         # Ücret: her WH_PER_STEP Wh = TL_PER_500WH TL oranıyla
         cost = round((energy_wh / WH_PER_STEP) * TL_PER_500WH, 2)
         nxt(f'page2.cost.txt="COST : {cost} TL"')
+
+        # Aktif sayfa status ise direkt bileşenlere de yaz (anında güncelle)
+        if on_status_page:
+            nxt(f'time.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
+            nxt(f'energy.txt="ENERGY: {energy_wh} Wh"')
+            nxt(f'cost.txt="COST : {cost} TL"')
     else:
         nxt('page2.time.txt="TIME : 00:00:00"')
         nxt('page2.energy.txt="ENERGY: 0 Wh"')
         nxt('page2.cost.txt="COST : 0.00 TL"')
+        if on_status_page:
+            nxt('time.txt="TIME : 00:00:00"')
+            nxt('energy.txt="ENERGY: 0 Wh"')
+            nxt('cost.txt="COST : 0.00 TL"')
 
 
 # ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
@@ -468,11 +503,12 @@ async def start_transaction(ws, id_tag: str = DEFAULT_ID_TAG):
 
 async def stop_transaction(ws):
     """Şarj durdur: CSMS'e StopTransaction + konnektör 'Available' durumuna geç."""
-    global transaction_id, meter_wh, charging_active
+    global transaction_id, meter_wh, charging_active, charge_start_time
     if transaction_id is None:
         log("WARN", "Aktif işlem yok!")
         return
-    charging_active = False
+    charging_active   = False
+    charge_start_time = None   # status sayfası sıfırlansın
     await send(ws, "StopTransaction", {
         "transactionId": transaction_id,
         "idTag":         DEFAULT_ID_TAG,
@@ -542,9 +578,10 @@ async def clock_loop():
 
 
 async def status_update_loop():
-    """Şarj aktifken her saniye status sayfasını güncelle."""
+    """Şarj aktifken her saniye status sayfasını güncelle.
+    Status sayfası aktifken şarj olmasa bile verileri göster."""
     while True:
-        if charging_active:
+        if charging_active or _nxt_current_page == NXT_PAGE_STATUS:
             nxt_update_status()
         await asyncio.sleep(1)
 
@@ -664,8 +701,8 @@ async def console_input(ws):
                 # Nextion'ı NOT CONNECTED yap (kırmızı, araç görseli gizli)
                 nxt_set_status("NOT CONNECTED")
                 # Kuyruktaki NOT CONNECTED komutlarının Nextion'a ulaşması için
-                # writer loop'a işleme fırsatı ver (her komut ~10ms, 3 komut var)
-                await asyncio.sleep(0.1)
+                # writer loop'a işleme fırsatı ver (her komut ~10ms, 5 komut var)
+                await asyncio.sleep(0.2)
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
@@ -714,18 +751,24 @@ async def main():
     #
     # Bağlantı henüz yok → NOT CONNECTED (kırmızı)
     nxt_set_status("NOT CONNECTED")
+    await asyncio.sleep(0.05)   # her blok arasında 50ms → Nextion tamponu taşmasın
     nxt_set_charge_percent(0)
+    await asyncio.sleep(0.05)
     nxt_set_time()
+    await asyncio.sleep(0.05)
     # user_info sayfası → id.txt'i config'den oku ve background RAM'e yaz
     nxt_set_user_id(DEFAULT_ID_TAG)
+    await asyncio.sleep(0.05)
     # status sayfası başlangıç değerleri
     nxt_update_status()
     # Writer loop'un kuyruktaki başlangıç komutlarını işlemesi için bekle
-    await asyncio.sleep(0.15)
+    await asyncio.sleep(0.3)
 
     def handle_sigint(*_):
         log("INFO", "Ctrl+C — bağlantı kesiliyor...")
         nxt_set_status("NOT CONNECTED")
+        # Kuyruğun boşalması için kısa bekleme (asyncio dışında olduğundan time.sleep kullan)
+        time.sleep(0.2)
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_sigint)
 
