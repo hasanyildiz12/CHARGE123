@@ -236,39 +236,54 @@ def nxt_set_user_id(id_tag: str):
 
 
 async def nextion_read_loop():
-    """Nextion'dan gelen buton olaylarını dinle (Touch Event 0x65)."""
-    loop = asyncio.get_event_loop()
-    buf  = bytearray()
+    """
+    Nextion'dan gelen buton olaylarını dinle (Touch Event 0x65).
+
+    ÖNEMLİ: _nxt_serial.read() blocking çağrısını run_in_executor ile
+    ayrı bir thread'e taşımak yasak — nxt_writer_loop() da aynı
+    _nxt_serial nesnesine asyncio thread'inden yazıyor. Bunu yapmak
+    thread-unsafe race condition'a yol açar; Nextion hiçbir şey almaz.
+
+    Bunun yerine: serial.in_waiting ile bekleyen byte var mı kontrol
+    edilir, varsa non-blocking read yapılır, yoksa asyncio.sleep ile
+    event loop'a geri dönülür → tek thread, sıfır race condition.
+    """
+    buf = bytearray()
     while True:
         if _nxt_serial is None:
             await asyncio.sleep(0.1)
             continue
         try:
-            chunk = await loop.run_in_executor(None, _nxt_serial.read, 32)
-            if chunk:
-                buf.extend(chunk)
-            # 0x65 touch event paketi: [0x65, page, comp, event, 0xFF, 0xFF, 0xFF] = 7 byte
-            while len(buf) >= 7:
-                idx = buf.find(0x65)
-                if idx == -1:
-                    buf.clear()
-                    break
-                if idx > 0:
-                    del buf[:idx]
-                if len(buf) < 7:
-                    break
-                if buf[4] == 0xFF and buf[5] == 0xFF and buf[6] == 0xFF:
-                    page_id = buf[1]
-                    comp_id = buf[2]
-                    event   = buf[3]   # 0x01 = press, 0x00 = release
-                    del buf[:7]
-                    if event == 0x01:
-                        log("INFO", f"Nextion touch → page={page_id} comp={comp_id}")
-                        if comp_id == 2:   # ← useridtag butonunun component ID'si
-                            log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
-                            nxt_set_user_id(DEFAULT_ID_TAG)
-                else:
-                    del buf[:1]   # bozuk paket, bir byte atla
+            waiting = _nxt_serial.in_waiting
+            if waiting > 0:
+                chunk = _nxt_serial.read(waiting)
+                if chunk:
+                    buf.extend(chunk)
+                # 0x65 touch event paketi: [0x65, page, comp, event, 0xFF, 0xFF, 0xFF] = 7 byte
+                while len(buf) >= 7:
+                    idx = buf.find(0x65)
+                    if idx == -1:
+                        buf.clear()
+                        break
+                    if idx > 0:
+                        del buf[:idx]
+                    if len(buf) < 7:
+                        break
+                    if buf[4] == 0xFF and buf[5] == 0xFF and buf[6] == 0xFF:
+                        page_id = buf[1]
+                        comp_id = buf[2]
+                        event   = buf[3]   # 0x01 = press, 0x00 = release
+                        del buf[:7]
+                        if event == 0x01:
+                            log("INFO", f"Nextion touch → page={page_id} comp={comp_id}")
+                            if comp_id == 2:   # ← useridtag butonunun component ID'si
+                                log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
+                                nxt_set_user_id(DEFAULT_ID_TAG)
+                    else:
+                        del buf[:1]   # bozuk paket, bir byte atla
+            else:
+                # Bekleyen byte yok → event loop'a bırak (CPU aç)
+                await asyncio.sleep(0.02)
         except Exception as e:
             log("WARN", f"Nextion okuma hatası: {e}")
             await asyncio.sleep(0.1)
@@ -626,15 +641,23 @@ async def main():
     nextion_open()
     # Seri hattın oturması + tampon temizliğinin etkili olması için bekleme.
     # Bu 300ms olmadan ilk komutlar hizasız gönderilip crash'e neden olabilir.
+    # Aynı zamanda nxt_writer_loop() görevinin event loop'tan CPU alıp
+    # başlaması için bir tick vermek gerekiyor → await ile bırakıyoruz.
     await asyncio.sleep(0.3)
 
     # ── Başlangıç ekran durumu ──────────────────────────────────────────────
-    # user_info sayfası: config'den okunan DEFAULT_ID_TAG, her başlatmada yazılır
-    nxt_set_user_id(DEFAULT_ID_TAG)
+    # NOT: nxt_set_user_id() BURADAN ÇIKARTILDI.
+    # Nextion hangi sayfada olduğunu bilmeden user_info sayfasındaki
+    # id.txt'e yazmak anlamsız — Nextion sadece aktif sayfasındaki
+    # komutları işler. id.txt güncelleme yalnızca user_info sayfasından
+    # buton basıldığında (nextion_read_loop içinde) yapılır.
+    #
     # Bağlantı henüz yok → NOT CONNECTED (kırmızı)
     nxt_set_status("NOT CONNECTED")
     nxt_set_charge_percent(0)
     nxt_set_time()
+    # Writer loop'un kuyruktaki bu ilk komutları işlemesi için bir tick ver
+    await asyncio.sleep(0.05)
 
     def handle_sigint(*_):
         log("INFO", "Ctrl+C — bağlantı kesiliyor...")
