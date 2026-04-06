@@ -193,7 +193,13 @@ def nxt_set_status(status: str):
     if status == "CONNECTED":
         text_to_show = "AVAILABLE"  # WebSocket bağlı ama idle
 
-    pic = PIC_CAR_CONNECTED if status != "NOT CONNECTED" else PIC_CAR_DISCONNECTED
+    if status == "CHARGING":
+        pic = 0
+    elif status == "NOT CONNECTED":
+        pic = PIC_CAR_DISCONNECTED
+    else:
+        pic = PIC_CAR_CONNECTED
+
     pco = colors.get(status, 63488)
     nxt(f'con.txt="{text_to_show}"')
     nxt(f"con.pco={pco}")
@@ -347,9 +353,11 @@ async def authorize(ws, id_tag: str = USER_ID_TAG):
 
 async def start_transaction(ws, id_tag: str = USER_ID_TAG):
     global meter_wh, charging_active, charge_start_time, transaction_end_time
+    meter_wh = 0
     charge_start_time = time.time()
     transaction_end_time = None
     charging_active   = True
+    nxt_set_status("CHARGING")
     nxt_update_status() # Reset UI quickly
     await send(ws, "StartTransaction", {
         "connectorId": 1,
@@ -364,8 +372,15 @@ async def stop_transaction(ws):
     if transaction_id is None:
         log("WARN", "Aktif işlem yok!")
         return
+        
+    # Transaction sonu anındaki enerjiyi hesapla
+    elapsed = time.time() - charge_start_time
+    meter_wh = int((elapsed * MAX_POWER_KW * 1000) / 3600)
+    
     charging_active = False
     transaction_end_time = time.time()
+    nxt_set_status("AVAILABLE")
+    
     await send(ws, "StopTransaction", {
         "transactionId": transaction_id,
         "idTag":         USER_ID_TAG,
@@ -374,7 +389,7 @@ async def stop_transaction(ws):
         "reason":        "Local",
     })
     nxt_update_status()
-    log("INFO", f"Şarj durduruldu — İşlem sonu")
+    log("INFO", f"Şarj durduruldu — İşlem sonu, Gönderilen Meter: {meter_wh} Wh")
 
 
 async def meter_values(ws):
