@@ -454,6 +454,17 @@ async def status_update_loop():
         await asyncio.sleep(1)
 
 
+async def auto_meter_values_loop(ws, interval: int = 10):
+    """Şarj devam ederken her 'interval' saniyede bir otomatik MeterValues yollar."""
+    while True:
+        await asyncio.sleep(interval)
+        if charging_active and charge_start_time:
+            try:
+                await meter_values(ws)
+            except Exception as e:
+                log("ERR", f"MeterValues otomatik gönderme hatası: {e}")
+
+
 # ─── Gelen Mesaj İşleyici ─────────────────────────────────────────────────────
 
 async def handle_message(ws, raw: str):
@@ -627,8 +638,9 @@ async def main():
             clock_task   = asyncio.create_task(clock_loop())
             status_task  = asyncio.create_task(status_update_loop())
             nextion_task = asyncio.create_task(nextion_read_loop())
+            meter_task   = asyncio.create_task(auto_meter_values_loop(ws, interval=10))
 
-            await asyncio.gather(recv_task, input_task, clock_task, status_task, nextion_task)
+            await asyncio.gather(recv_task, input_task, clock_task, status_task, nextion_task, meter_task)
 
     except OSError as e:
         log("ERR", f"Bağlantı başarısız: {e}")
