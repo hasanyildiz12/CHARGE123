@@ -18,7 +18,7 @@ FIRMWARE = "1.0.0"
 
 # ─── Authentication ──────────────────────────────────────────────────────────
 
-DEFAULT_ID_TAG      = "hasanyildizidtag"
+USER_ID_TAG         = "hasanyildizidtag"
 BASIC_AUTH_USER     = "CP-1"
 BASIC_AUTH_PASSWORD = "1234567890asdfgh"
 
@@ -50,12 +50,12 @@ NEXTION_BAUDRATE = 9600
 
 # ─── Nextion Picture IDs ─────────────────────────────────────────────────────
 # Görseller ID:
-#   0  → yeşil araç (bağlı)
-#   3  → kırmızı araç (bağlı değil)
+#   3  → yeşil araç (bağlı)
+#   0  → yeşil araç (bağlı değil/çıkış)
 #   5,6,7 → RFID animasyon kareleri (rfid_scan sayfası)
 
-PIC_CAR_CONNECTED    = 0
-PIC_CAR_DISCONNECTED = 3
+PIC_CAR_CONNECTED    = 3
+PIC_CAR_DISCONNECTED = 0
 PIC_RFID_FRAMES      = [5, 6, 7]
 
 # ─── Nextion Renk Kodları (RGB565) ───────────────────────────────────────────
@@ -65,9 +65,7 @@ PIC_RFID_FRAMES      = [5, 6, 7]
 #   CHARGING       → 11939   (yeşil     0x2EA3)
 
 # ─── Şarj / Ücretlendirme ────────────────────────────────────────────────────
-# 500 Wh  → %5 şarj artışı
-# 500 Wh  → 5 TL
+# 22 kW maksimum şarj kapasitesi ile matematiksel enerji ölçümü
 
-WH_PER_STEP        = 500    # Her MeterValues çağrısında eklenen Wh
-PERCENT_PER_STEP   = 5      # Her adımdaki şarj yüzdesi artışı
-TL_PER_500WH       = 5.0    # 500 Wh başına ücret (TL)
+MAX_POWER_KW   = 22.0    # İstasyonun maksimum gücü (kW)
+COST_PER_KWH   = 0.19    # kWh başına ücret ($)

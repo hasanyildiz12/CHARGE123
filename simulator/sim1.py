@@ -34,7 +34,7 @@ sys.path.insert(0, ".")
 from config import (
     CSMS_URL,
     CHARGE_BOX_ID,
-    DEFAULT_ID_TAG,
+    USER_ID_TAG,
     NFC_ALLOWED_ID,
     VENDOR, MODEL, SERIAL, FIRMWARE,
     HEARTBEAT_INTERVAL,
@@ -49,9 +49,8 @@ from config import (
     NEXTION_BAUDRATE,
     PIC_CAR_CONNECTED,
     PIC_CAR_DISCONNECTED,
-    WH_PER_STEP,
-    PERCENT_PER_STEP,
-    TL_PER_500WH,
+    MAX_POWER_KW,
+    COST_PER_KWH,
 )
 
 # ─── Runtime State ────────────────────────────────────────────────────────────
@@ -63,14 +62,13 @@ hb_interval    = HEARTBEAT_INTERVAL
 hb_task        = None
 
 # Şarj durumu
-charge_percent    = 0        # %0 - %100
-charge_start_time = None     # şarj başladığında set edilir
-charging_active   = False    # şarj devam ediyor mu?
-total_cost        = 0.0      # toplam ücret (TL)
-total_energy_wh   = 0        # toplam çekilen enerji (Wh)
+charge_start_time    = None     # şarj başladığında set edilir
+transaction_end_time = None     # şarj durdurulduğunda set edilir
+charging_active      = False    # şarj devam ediyor mu?
 
 # Bağlantı durumu
 is_connected = False
+current_status = "NOT CONNECTED"
 
 # ─── ANSI Renk Kodları ────────────────────────────────────────────────────────
 
@@ -116,6 +114,7 @@ def wait_for_nfc_auth():
     print(f"{YELLOW}Kartı okuyucuya yaklaştırın...{RESET}\n")
 
     init_pn532()
+    nxt("page 1")
 
     while True:
         try:
@@ -125,12 +124,15 @@ def wait_for_nfc_auth():
                 if uid_str == NFC_ALLOWED_ID:
                     print(f"{GREEN}{BOLD}✓ Kart onaylandı  : {uid_str}{RESET}")
                     print(f"{GREEN}  Simülasyon başlıyor...{RESET}\n")
+                    nxt("page 2")
                     return  # Doğrulama başarılı → simülasyon devam eder
                 else:
                     print(f"{RED}✗ Geçersiz kart   : {uid_str}  —  Tekrar deneyin{RESET}")
             time.sleep(0.1)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}Çıkış yapılıyor...{RESET}")
+            nxt("page 1")
+            time.sleep(0.5)
             sys.exit(0)
 
 
@@ -176,27 +178,31 @@ def nxt_set_status(status: str):
     home sayfası con objesi + araba görseli.
     status: 'NOT CONNECTED' | 'CONNECTED' | 'AVAILABLE' | 'CHARGING'
     """
+    global current_status
+    current_status = status
+    
     colors = {
-        "NOT CONNECTED": 63488,   # kırmızı  0xF800
-        "CONNECTED":     11939,    # yeşil    0x0400
-        "AVAILABLE":     11939,    # açık yeşil 0x07E0
-        "CHARGING":      2047,    # cyan     0x07FF
+        "NOT CONNECTED": 63488,   # kırmızı
+        "CONNECTED":     2047,    # cyan
+        "AVAILABLE":     2047,    # cyan
+        "CHARGING":      11939,   # yeşil
     }
+    
+    # Ekranda göstereceğimiz yazıyı belirleme
+    text_to_show = status
+    if status == "CONNECTED":
+        text_to_show = "AVAILABLE"  # WebSocket bağlı ama idle
+
     pic = PIC_CAR_CONNECTED if status != "NOT CONNECTED" else PIC_CAR_DISCONNECTED
     pco = colors.get(status, 63488)
-    nxt(f'con.txt="{status}"')
+    nxt(f'con.txt="{text_to_show}"')
     nxt(f"con.pco={pco}")
     nxt(f"araba.pic={pic}")
 
 
-def nxt_set_charge_percent(pct: int):
-    """home sayfası percent → şarj yüzdesi."""
-    nxt(f'percent.txt="% {pct}"')
-
-
 def nxt_set_user_id(id_tag: str):
-    """user_info sayfası id → idTag."""
-    nxt(f'id.txt="{id_tag}"')
+    """Ana sayfa userinfo objesine idTag yazar."""
+    nxt(f'userinfo.txt="{id_tag}"')
 
 
 async def nextion_read_loop():
@@ -231,8 +237,8 @@ async def nextion_read_loop():
                         # useridtag butonu: hangi sayfada / component ise buraya düş
                         # Nextion Editor'da butonun "id" değerine göre comp_id'yi eşle
                         if comp_id == 2:   # ← useridtag butonunun component ID'si
-                            log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
-                            nxt_set_user_id(DEFAULT_ID_TAG)
+                            log("INFO", f"useridtag butonu → id yazılıyor: {USER_ID_TAG}")
+                            nxt_set_user_id(USER_ID_TAG)
                 else:
                     del buf[:1]   # bozuk paket, bir byte atla
         except Exception as e:
@@ -243,34 +249,41 @@ async def nextion_read_loop():
 def nxt_update_status():
     """
     status sayfası güncelle:
-      power  → anlık güç (kW) = V × A / 1000, sabit
-      time   → geçen süre (HH:MM:SS), her saniye artar
-      energy → geçen_saniye × METER_INCREMENT_WH  (Wh)
-               Örnek: 10s × 500 = 5000 Wh
-      cost   → toplam ücret (TL) = (energy_wh / WH_PER_STEP) × TL_PER_500WH
-    Şarj aktif değilse son değerleri dondurur.
+      power  : 22kW (21.85 kW yazılacak sadece)
+      time   : HH.MM.SS (Start ile Stop arası)
+      energy : Matematiksel hesap (kWh) 
+      cost   : 0.19 $ / kWh
     """
-    power_kw = round(DEFAULT_VOLTAGE * DEFAULT_CURRENT / 1000, 2)
-    nxt(f'power.txt="POWER : {power_kw} KW"')
-
     if charge_start_time is not None:
-        elapsed = int(time.time() - charge_start_time)   # saniye cinsinden
-        h = elapsed // 3600
-        m = (elapsed % 3600) // 60
-        s = elapsed % 60
-        nxt(f'time.txt="TIME : {h:02d}:{m:02d}:{s:02d}"')
+        if charging_active:
+            elapsed = time.time() - charge_start_time
+        else:
+            if transaction_end_time:
+                elapsed = transaction_end_time - charge_start_time
+            else:
+                elapsed = 0
+                
+        h = int(elapsed // 3600)
+        m = int((elapsed % 3600) // 60)
+        s = int(elapsed % 60)
+        nxt(f'time.txt="{h:02d}.{m:02d}.{s:02d}"')
 
-        # Enerji: geçen_saniye × METER_INCREMENT_WH  (Wh)
-        energy_wh = elapsed * METER_INCREMENT_WH
-        nxt(f'energy.txt="ENERGY: {energy_wh} Wh"')
+        # 22kW limit -> saniyede 22/3600 kWh
+        energy_kwh = (elapsed * MAX_POWER_KW) / 3600.0
+        nxt(f'energy.txt="amount of use : {energy_kwh:.2f} kWh"')
 
-        # Ücret: her WH_PER_STEP Wh = TL_PER_500WH TL oranıyla
-        cost = round((energy_wh / WH_PER_STEP) * TL_PER_500WH, 2)
-        nxt(f'cost.txt="COST : {cost} TL"')
+        cost = energy_kwh * COST_PER_KWH
+        nxt(f'cost.txt="{cost:.2f} $"')
+        
+        if charging_active:
+            nxt('power.txt="21.85 kW"')
+        else:
+            nxt('power.txt="0.00 kW"')
     else:
-        nxt('time.txt="TIME : 00:00:00"')
-        nxt('energy.txt="ENERGY: 0 Wh"')
-        nxt('cost.txt="COST : 0.00 TL"')
+        nxt('time.txt="00.00.00"')
+        nxt('energy.txt="amount of use : 0.00 kWh"')
+        nxt('cost.txt="0.00 $"')
+        nxt('power.txt="0.00 kW"')
 
 
 # ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
@@ -328,19 +341,16 @@ async def status_notification(ws, connector_id: int, status: str, error_code: st
     nxt_set_status(status.upper())
 
 
-async def authorize(ws, id_tag: str = DEFAULT_ID_TAG):
+async def authorize(ws, id_tag: str = USER_ID_TAG):
     await send(ws, "Authorize", {"idTag": id_tag})
 
 
-async def start_transaction(ws, id_tag: str = DEFAULT_ID_TAG):
-    global meter_wh, charging_active, charge_start_time, charge_percent
-    global total_energy_wh, total_cost
+async def start_transaction(ws, id_tag: str = USER_ID_TAG):
+    global meter_wh, charging_active, charge_start_time, transaction_end_time
     charge_start_time = time.time()
+    transaction_end_time = None
     charging_active   = True
-    charge_percent    = 0
-    total_energy_wh   = 0
-    total_cost        = 0.0
-    nxt_set_charge_percent(0)
+    nxt_update_status() # Reset UI quickly
     await send(ws, "StartTransaction", {
         "connectorId": 1,
         "idTag":       id_tag,
@@ -350,35 +360,33 @@ async def start_transaction(ws, id_tag: str = DEFAULT_ID_TAG):
 
 
 async def stop_transaction(ws):
-    global transaction_id, meter_wh, charging_active
+    global transaction_id, meter_wh, charging_active, transaction_end_time
     if transaction_id is None:
         log("WARN", "Aktif işlem yok!")
         return
     charging_active = False
+    transaction_end_time = time.time()
     await send(ws, "StopTransaction", {
         "transactionId": transaction_id,
-        "idTag":         DEFAULT_ID_TAG,
+        "idTag":         USER_ID_TAG,
         "meterStop":     meter_wh,
         "timestamp":     iso_now(),
         "reason":        "Local",
     })
-    # Status sayfasını dondur (son değerler kalır)
     nxt_update_status()
-    log("INFO", f"Şarj durduruldu — Toplam: {total_energy_wh} Wh, {round(total_cost,2)} TL")
+    log("INFO", f"Şarj durduruldu — İşlem sonu")
 
 
 async def meter_values(ws):
     """MeterValues gönder ve Nextion'ı güncelle."""
-    global meter_wh, transaction_id, charge_percent, total_energy_wh, total_cost
+    global meter_wh, transaction_id
 
-    if not charging_active:
+    if not charging_active or not charge_start_time:
         log("WARN", "Şarj aktif değil — MeterValues gönderilmedi")
         return
 
-    meter_wh        += METER_INCREMENT_WH
-    charge_percent  = min(charge_percent + PERCENT_PER_STEP, 100)
-    total_energy_wh += WH_PER_STEP
-    total_cost      += TL_PER_500WH
+    elapsed = time.time() - charge_start_time
+    meter_wh = int((elapsed * MAX_POWER_KW * 1000) / 3600)  # Wh cinsinden enerji miktarı
 
     payload = {
         "connectorId": 1,
@@ -388,6 +396,7 @@ async def meter_values(ws):
                 {"value": str(meter_wh),        "measurand": "Energy.Active.Import.Register", "unit": "Wh"},
                 {"value": str(DEFAULT_VOLTAGE),  "measurand": "Voltage",        "unit": "V"},
                 {"value": str(DEFAULT_CURRENT),  "measurand": "Current.Import", "unit": "A"},
+                {"value": str(int(MAX_POWER_KW * 1000)), "measurand": "Power.Active.Import", "unit": "W"}
             ]
         }]
     }
@@ -397,9 +406,8 @@ async def meter_values(ws):
     await send(ws, "MeterValues", payload)
 
     # Nextion güncelle
-    nxt_set_charge_percent(charge_percent)
     nxt_update_status()
-    log("INFO", f"Şarj: %{charge_percent} | Enerji: {total_energy_wh} Wh | Ücret: {total_cost:.2f} TL")
+    log("INFO", f"MeterValues Gönderildi: {meter_wh} Wh")
 
 
 # ─── Periyodik Görevler ───────────────────────────────────────────────────────
@@ -418,14 +426,16 @@ async def clock_loop():
     """Her saniye Nextion home sayfasındaki saati güncelle."""
     while True:
         nxt_set_time()
+        # Her koşulda ekrandaki değerlerin korunmasını garantileyelim
+        nxt_set_status(current_status)
+        nxt_set_user_id(USER_ID_TAG)
         await asyncio.sleep(1)
 
 
 async def status_update_loop():
-    """Şarj aktifken her saniye status sayfasını güncelle."""
+    """Her saniye status sayfasını güncelle."""
     while True:
-        if charging_active:
-            nxt_update_status()
+        nxt_update_status()
         await asyncio.sleep(1)
 
 
@@ -531,6 +541,8 @@ async def console_input(ws):
             elif choice in ("q", "quit", "exit"):
                 log("INFO", "Çıkılıyor...")
                 nxt_set_status("NOT CONNECTED")
+                nxt("page 1")
+                time.sleep(0.5)
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
@@ -559,19 +571,17 @@ async def main():
     print(f"\n{BOLD}OCPP 1.6J Simülatör · Nextion 3.5\" Entegrasyonu{RESET}")
     print(f"{DIM}Bağlanılıyor: {CSMS_URL}{RESET}\n")
 
-    # Nextion portu aç
-    nextion_open()
-
     # Başlangıç ekran durumu
     nxt_set_status("NOT CONNECTED")
-    nxt_set_charge_percent(0)
     nxt_set_time()
-    # NFC doğrulaması geçildi → config'deki idTag'i user_info sayfası id.txt'e yaz
-    nxt_set_user_id(DEFAULT_ID_TAG)
+    # NFC doğrulaması geçildi → config'deki idTag'i ana sayfa userinfo.txt'e yaz
+    nxt_set_user_id(USER_ID_TAG)
 
     def handle_sigint(*_):
         log("INFO", "Ctrl+C — bağlantı kesiliyor...")
         nxt_set_status("NOT CONNECTED")
+        nxt("page 1")
+        time.sleep(0.5)
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_sigint)
 
@@ -591,7 +601,7 @@ async def main():
 
             # Nextion'ı güncelle — bağlantı kurulunca otomatik
             nxt_set_status("CONNECTED")
-            nxt_set_user_id(DEFAULT_ID_TAG)   # user_info sayfası id objesi kalıcı yazılır
+            nxt_set_user_id(USER_ID_TAG)   # ana sayfa userinfo objesi kalıcı yazılır
 
             # Otomatik BootNotification
             await boot_notification(ws)
@@ -617,7 +627,9 @@ async def main():
 # ─── Giriş Noktası ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # 1. NFC kart doğrulaması — geçerli kart okutulana kadar bloke eder
+    # 0. İlk olarak Nextion bağlantısını başlatıyoruz
+    nextion_open()
+    # 1. NFC kart doğrulaması — geçerli kart okutulana kadar bloke eder ve rfid_scan sayfasını açar
     wait_for_nfc_auth()
     # 2. Doğrulama başarılı → OCPP simülatörünü başlat
     asyncio.run(main())
