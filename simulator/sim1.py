@@ -567,7 +567,7 @@ async def console_input(ws):
                 log("INFO", "Çıkılıyor...")
                 
                 # CSMS'e Unavailable/Available durumu göndererek boşa çıkart
-                await status_notification(ws, 1, "Available")
+                await status_notification(ws, 1, "Unavailable")
                 
                 nxt_set_status("NOT CONNECTED")
                 nxt("page rfid_scan")
