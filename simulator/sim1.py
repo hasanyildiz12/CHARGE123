@@ -72,11 +72,6 @@ total_energy_wh   = 0        # toplam çekilen enerji (Wh)
 # Bağlantı durumu
 is_connected = False
 
-# Nextion aktif sayfa takibi (0=home, 1=user_info, 2=status, 3=rfid_scan)
-_current_page = 0
-# Son bilinen durum (sayfa değiştiğinde yeniden göndermek için)
-_last_status = "NOT CONNECTED"
-
 # ─── ANSI Renk Kodları ────────────────────────────────────────────────────────
 
 RESET  = "\033[0m"
@@ -179,15 +174,12 @@ def nxt_set_time():
 def nxt_set_status(status: str):
     """
     home sayfası con objesi + araba görseli.
-    Status değerini _last_status'a kaydeder; sayfa değiştiğinde yeniden gönderilir.
     status: 'NOT CONNECTED' | 'CONNECTED' | 'AVAILABLE' | 'CHARGING'
     """
-    global _last_status
-    _last_status = status
     colors = {
         "NOT CONNECTED": 63488,   # kırmızı  0xF800
-        "CONNECTED":     11939,   # yeşil    0x2EA3
-        "AVAILABLE":     11939,   # yeşil    0x2EA3
+        "CONNECTED":     11939,    # yeşil    0x0400
+        "AVAILABLE":     11939,    # açık yeşil 0x07E0
         "CHARGING":      2047,    # cyan     0x07FF
     }
     pic = PIC_CAR_CONNECTED if status != "NOT CONNECTED" else PIC_CAR_DISCONNECTED
@@ -207,78 +199,42 @@ def nxt_set_user_id(id_tag: str):
     nxt(f'id.txt="{id_tag}"')
 
 
-def _resend_home_state():
-    """Home sayfasına (page0) dönüldüğünde son durumu yeniden gönder."""
-    nxt_set_status(_last_status)
-    nxt_set_charge_percent(charge_percent)
-    nxt_set_time()
-
-
 async def nextion_read_loop():
-    """
-    Nextion'dan gelen olayları dinle:
-      0x65 → Touch Event  [0x65, page, comp, event, 0xFF, 0xFF, 0xFF]  7 byte
-      0x66 → Page Change  [0x66, page_id, 0xFF, 0xFF, 0xFF]            5 byte
-    Sayfa değiştiğinde ilgili sayfanın verilerini yeniden gönderir.
-
-    THREAD SAFETY: in_waiting + non-blocking read kullanılır.
-    """
-    global _current_page
-    buf = bytearray()
+    """Nextion'dan gelen buton olaylarını dinle (Touch Event 0x65)."""
+    loop = asyncio.get_event_loop()
+    buf  = bytearray()
     while True:
         if _nxt_serial is None:
             await asyncio.sleep(0.1)
             continue
         try:
-            waiting = _nxt_serial.in_waiting
-            if waiting > 0:
-                chunk = _nxt_serial.read(waiting)
-                if chunk:
-                    buf.extend(chunk)
-
-                while len(buf) >= 5:
-                    # ── 0x66 Page Change: [0x66, page, 0xFF, 0xFF, 0xFF] ──
-                    if buf[0] == 0x66:
-                        if len(buf) >= 5 and buf[2] == 0xFF and buf[3] == 0xFF and buf[4] == 0xFF:
-                            new_page = buf[1]
-                            del buf[:5]
-                            _current_page = new_page
-                            log("INFO", f"Nextion sayfa değişti → page={new_page}")
-                            # Sayfaya göre verileri yeniden gönder
-                            if new_page == 0:
-                                _resend_home_state()
-                            elif new_page == 1:
-                                log("INFO", f"user_info açıldı → id yazılıyor: {DEFAULT_ID_TAG}")
-                                nxt_set_user_id(DEFAULT_ID_TAG)
-                            elif new_page == 2:
-                                nxt_update_status()
-                            continue
-                        else:
-                            del buf[:1]
-                            continue
-
-                    # ── 0x65 Touch Event: [0x65, page, comp, event, 0xFF, 0xFF, 0xFF] ──
-                    if buf[0] == 0x65:
-                        if len(buf) < 7:
-                            break
-                        if buf[4] == 0xFF and buf[5] == 0xFF and buf[6] == 0xFF:
-                            page_id = buf[1]
-                            comp_id = buf[2]
-                            event   = buf[3]   # 0x01 = press, 0x00 = release
-                            del buf[:7]
-                            if event == 0x01:
-                                log("INFO", f"Nextion touch → page={page_id} comp={comp_id}")
-                                if comp_id == 2:
-                                    log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
-                                    nxt_set_user_id(DEFAULT_ID_TAG)
-                        else:
-                            del buf[:1]
-                        continue
-
-                    # Bilinmeyen bayt → atla
-                    del buf[:1]
-            else:
-                await asyncio.sleep(0.02)
+            chunk = await loop.run_in_executor(None, _nxt_serial.read, 32)
+            if chunk:
+                buf.extend(chunk)
+            # 0x65 touch event paketi: [0x65, page, comp, event, 0xFF, 0xFF, 0xFF] = 7 byte
+            while len(buf) >= 7:
+                idx = buf.find(0x65)
+                if idx == -1:
+                    buf.clear()
+                    break
+                if idx > 0:
+                    del buf[:idx]
+                if len(buf) < 7:
+                    break
+                if buf[4] == 0xFF and buf[5] == 0xFF and buf[6] == 0xFF:
+                    page_id = buf[1]
+                    comp_id = buf[2]
+                    event   = buf[3]   # 0x01 = press, 0x00 = release
+                    del buf[:7]
+                    if event == 0x01:
+                        log("INFO", f"Nextion touch → page={page_id} comp={comp_id}")
+                        # useridtag butonu: hangi sayfada / component ise buraya düş
+                        # Nextion Editor'da butonun "id" değerine göre comp_id'yi eşle
+                        if comp_id == 2:   # ← useridtag butonunun component ID'si
+                            log("INFO", f"useridtag butonu → id yazılıyor: {DEFAULT_ID_TAG}")
+                            nxt_set_user_id(DEFAULT_ID_TAG)
+                else:
+                    del buf[:1]   # bozuk paket, bir byte atla
         except Exception as e:
             log("WARN", f"Nextion okuma hatası: {e}")
             await asyncio.sleep(0.1)
@@ -290,6 +246,7 @@ def nxt_update_status():
       power  → anlık güç (kW) = V × A / 1000, sabit
       time   → geçen süre (HH:MM:SS), her saniye artar
       energy → geçen_saniye × METER_INCREMENT_WH  (Wh)
+               Örnek: 10s × 500 = 5000 Wh
       cost   → toplam ücret (TL) = (energy_wh / WH_PER_STEP) × TL_PER_500WH
     Şarj aktif değilse son değerleri dondurur.
     """
@@ -367,9 +324,8 @@ async def status_notification(ws, connector_id: int, status: str, error_code: st
         "errorCode":   error_code,
         "timestamp":   iso_now(),
     })
-    # Yalnızca konnektör 1 için Nextion'ı güncelle (connector_id=0 charge point seviyesidir)
-    if connector_id == 1:
-        nxt_set_status(status.upper())
+    # Nextion con objesini OCPP status ile güncelle
+    nxt_set_status(status.upper())
 
 
 async def authorize(ws, id_tag: str = DEFAULT_ID_TAG):
@@ -573,17 +529,8 @@ async def console_input(ws):
             elif choice == "8":
                 await stop_transaction(ws)
             elif choice in ("q", "quit", "exit"):
-                log("INFO", "Çıkılıyor — CSMS'e Unavailable bildiriliyor...")
-                # CSMS'e konnektörün devre dışı olduğunu bildir
-                try:
-                    await status_notification(ws, 1, "Unavailable")
-                except Exception:
-                    pass
-                # Nextion'ı NOT CONNECTED yap
+                log("INFO", "Çıkılıyor...")
                 nxt_set_status("NOT CONNECTED")
-                # Nextion komutlarının seri porta yazılması için kısa bekle
-                # (3 komut × ~5ms = ~15ms; 150ms yeterince güvenli)
-                await asyncio.sleep(0.15)
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
@@ -614,13 +561,12 @@ async def main():
 
     # Nextion portu aç
     nextion_open()
-    # Seri hattın oturması için kısa bekleme
-    await asyncio.sleep(0.2)
 
-    # ── Başlangıç ekran durumu ──────────────────────────────────────────────
+    # Başlangıç ekran durumu
     nxt_set_status("NOT CONNECTED")
     nxt_set_charge_percent(0)
     nxt_set_time()
+    # NFC doğrulaması geçildi → config'deki idTag'i user_info sayfası id.txt'e yaz
     nxt_set_user_id(DEFAULT_ID_TAG)
 
     def handle_sigint(*_):
