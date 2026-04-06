@@ -565,9 +565,13 @@ async def console_input(ws):
                 await stop_transaction(ws)
             elif choice in ("q", "quit", "exit"):
                 log("INFO", "Çıkılıyor...")
+                
+                # CSMS'e Unavailable/Available durumu göndererek boşa çıkart
+                await status_notification(ws, 1, "Available")
+                
                 nxt_set_status("NOT CONNECTED")
                 nxt("page rfid_scan")
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
                 sys.exit(0)
             elif choice == "m":
                 print_menu()
@@ -630,6 +634,9 @@ async def main():
 
             # Otomatik BootNotification
             await boot_notification(ws)
+            
+            # Sunucuda konnektörü müsait (Available) durumuna getir
+            await status_notification(ws, 1, "Available")
 
             # Paralel görevler
             recv_task    = asyncio.create_task(recv_loop(ws))
