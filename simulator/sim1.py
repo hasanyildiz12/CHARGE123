@@ -114,7 +114,7 @@ def wait_for_nfc_auth():
     print(f"{YELLOW}Kartı okuyucuya yaklaştırın...{RESET}\n")
 
     init_pn532()
-    nxt("page 1")
+    nxt("page rfid_scan")
 
     while True:
         try:
@@ -124,14 +124,14 @@ def wait_for_nfc_auth():
                 if uid_str == NFC_ALLOWED_ID:
                     print(f"{GREEN}{BOLD}✓ Kart onaylandı  : {uid_str}{RESET}")
                     print(f"{GREEN}  Simülasyon başlıyor...{RESET}\n")
-                    nxt("page 2")
+                    nxt("page home")
                     return  # Doğrulama başarılı → simülasyon devam eder
                 else:
                     print(f"{RED}✗ Geçersiz kart   : {uid_str}  —  Tekrar deneyin{RESET}")
             time.sleep(0.1)
         except KeyboardInterrupt:
             print(f"\n{YELLOW}Çıkış yapılıyor...{RESET}")
-            nxt("page 1")
+            nxt("page rfid_scan")
             time.sleep(0.5)
             sys.exit(0)
 
@@ -266,7 +266,7 @@ def nxt_update_status():
         h = int(elapsed // 3600)
         m = int((elapsed % 3600) // 60)
         s = int(elapsed % 60)
-        nxt(f'time.txt="{h:02d}.{m:02d}.{s:02d}"')
+        nxt(f'time.txt="TIME : {h:02d}.{m:02d}.{s:02d}"')
 
         # 22kW limit -> saniyede 22/3600 kWh
         energy_kwh = (elapsed * MAX_POWER_KW) / 3600.0
@@ -276,14 +276,14 @@ def nxt_update_status():
         nxt(f'cost.txt="{cost:.2f} $"')
         
         if charging_active:
-            nxt('power.txt="21.85 kW"')
+            nxt('power.txt="POWER : 21.85 kW"')
         else:
-            nxt('power.txt="0.00 kW"')
+            nxt('power.txt="POWER : 0.00 kW"')
     else:
-        nxt('time.txt="00.00.00"')
+        nxt('time.txt="TIME : 00.00.00"')
         nxt('energy.txt="amount of use : 0.00 kWh"')
         nxt('cost.txt="0.00 $"')
-        nxt('power.txt="0.00 kW"')
+        nxt('power.txt="POWER : 0.00 kW"')
 
 
 # ─── Yardımcı Fonksiyonlar ────────────────────────────────────────────────────
@@ -505,7 +505,7 @@ def print_menu():
   {BOLD}2{RESET}  Heartbeat (manual)
   {BOLD}3{RESET}  StatusNotification → Available
   {BOLD}4{RESET}  StatusNotification → Charging
-  {BOLD}5{RESET}  Authorize ({DEFAULT_ID_TAG})
+  {BOLD}5{RESET}  Authorize ({USER_ID_TAG})
   {BOLD}6{RESET}  StartTransaction   [şarjı başlat]
   {BOLD}7{RESET}  MeterValues        [+500 Wh, +%5]
   {BOLD}8{RESET}  StopTransaction    [şarjı durdur]
@@ -541,7 +541,7 @@ async def console_input(ws):
             elif choice in ("q", "quit", "exit"):
                 log("INFO", "Çıkılıyor...")
                 nxt_set_status("NOT CONNECTED")
-                nxt("page 1")
+                nxt("page rfid_scan")
                 time.sleep(0.5)
                 sys.exit(0)
             elif choice == "m":
@@ -580,7 +580,7 @@ async def main():
     def handle_sigint(*_):
         log("INFO", "Ctrl+C — bağlantı kesiliyor...")
         nxt_set_status("NOT CONNECTED")
-        nxt("page 1")
+        nxt("page rfid_scan")
         time.sleep(0.5)
         sys.exit(0)
     signal.signal(signal.SIGINT, handle_sigint)

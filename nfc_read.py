@@ -67,17 +67,18 @@ def read_uid():
             
     return None
 
-print("Başlatılıyor...")
-init_pn532()
+if __name__ == '__main__':
+    print("Başlatılıyor...")
+    init_pn532()
 
-print("Kartı okutun...")
-while True:
-    try:
-        uid = read_uid()
-        if uid:
-            print(">>> KART BULUNDU! ID:", uid.hex().upper())
-            time.sleep(1) # Aynı kartı saniyede 1 kere okumak için bekleme
-        time.sleep(0.1)
-    except KeyboardInterrupt:
-        print("\nÇıkış yapılıyor...")
-        break
+    print("Kartı okutun...")
+    while True:
+        try:
+            uid = read_uid()
+            if uid:
+                print(">>> KART BULUNDU! ID:", uid.hex().upper())
+                time.sleep(1) # Aynı kartı saniyede 1 kere okumak için bekleme
+            time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("\nÇıkış yapılıyor...")
+            break
