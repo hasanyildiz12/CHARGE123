@@ -533,7 +533,6 @@ def print_menu():
   {BOLD}4{RESET}  StatusNotification → Charging
   {BOLD}5{RESET}  Authorize ({USER_ID_TAG})
   {BOLD}6{RESET}  StartTransaction   [şarjı başlat]
-  {BOLD}7{RESET}  MeterValues        [+500 Wh, +%5]
   {BOLD}8{RESET}  StopTransaction    [şarjı durdur]
   {BOLD}m{RESET}  Menüyü göster
   {BOLD}q{RESET}  Çıkış
